@@ -1,31 +1,49 @@
 # تنزيل فيديو مصرح به من يوتيوب
 
-هذا المشروع يقرأ رابط الفيديو من `VIDEO_URL` في ملف `.env` وينزله إلى مجلد `downloads/` باستخدام نسخ محمولة مضمّنة من `yt-dlp` و`ffmpeg`. يعرض الدقات المتاحة، ثم يختار دقة عشوائية منها ويحمّل أفضل مسار فيديو بهذه الدقة مع مسار الصوت. لا يؤتمت موقع RaiLoad ولا يتجاوز شروط مواقع الطرف الثالث.
+هذا المشروع يقرأ رابط الفيديو من `VIDEO_URL` في ملف `.env` وينزله إلى مجلد `downloads/` باستخدام `yt-dlp` ونسخة FFmpeg التي توفرها حزمة `imageio-ffmpeg`. يعرض الدقات المتاحة، ثم يختار دقة عشوائية منها ويحمّل أفضل مسار فيديو بهذه الدقة مع مسار الصوت.
 
 استخدمه فقط مع فيديو تملكه أو لديك إذن واضح بتنزيله، والتزم بحقوق النشر وشروط يوتيوب والقوانين المحلية.
 
-## التشغيل
+## التشغيل على Wispbyte
 
-لا يحتاج المشروع إلى تثبيت `yt-dlp` أو `ffmpeg` في النظام، ولا يحتاج إلى `sudo` أو إلى تثبيت حزم Python خارجية.
+لا تحتاج إلى Git LFS ولا إلى `sudo`. اجعل متغيرات الاستضافة كالآتي:
 
-```bash
-cp .env.example .env
-python3 downloader.py
+```text
+AUTO_UPDATE=1
+PY_FILE=downloader.py
+REQUIREMENTS_FILE=requirements.txt
+PY_PACKAGES=
 ```
 
-عدّل `VIDEO_URL` داخل `.env`. عند التشغيل سيظهر مثلًا `Available qualities: 360p, 720p, 1080p` ثم يطبع الدقة التي اختارها عشوائيًا. الأدوات التنفيذية موجودة داخل `bin/`، لذلك يجب رفع هذا المجلد كاملًا مع المشروع.
+أمر التشغيل:
+
+```bash
+if [[ -d .git ]] && [[ "${AUTO_UPDATE}" == "1" ]]; then git pull --ff-only; fi
+if [[ -n "${PY_PACKAGES}" ]]; then pip install -U --prefix .local ${PY_PACKAGES}; fi
+if [[ -f "/home/container/${REQUIREMENTS_FILE}" ]]; then pip install -U --prefix .local -r "/home/container/${REQUIREMENTS_FILE}"; fi
+export PYTHONPATH="/home/container/.local/lib/python3.14/site-packages:${PYTHONPATH}"
+exec /usr/local/bin/python /home/container/${PY_FILE}
+```
+
+ضع الرابط داخل `/home/container/.env`:
+
+```env
+VIDEO_URL=https://m.youtube.com/watch?v=yNkdwvFXSOc
+OUTPUT_DIR=downloads
+MAX_RETRIES=3
+SOCKET_TIMEOUT=30
+```
+
+في أول تشغيل، ستقوم Wispbyte بتثبيت `yt-dlp` و`imageio-ffmpeg` من `requirements.txt`. لا تستخدم ملفات `bin/` القديمة من الإصدارات السابقة؛ تم حذفها لتجنب مشكلة Git LFS و`Exec format error`.
 
 ## إعدادات اختيارية
 
 - `OUTPUT_DIR`: مجلد الحفظ، والافتراضي `downloads`.
+- `FORMAT`: محدد أولي لـ yt-dlp، والاختيار النهائي يتم عشوائيًا من الدقات المتاحة.
 - `MERGE_FORMAT`: صيغة الدمج، والافتراضي `mp4`.
 - `MAX_RETRIES`: عدد محاولات إعادة الاتصال، والافتراضي `3`.
 - `SOCKET_TIMEOUT`: مهلة الشبكة بالثواني، والافتراضي `30`.
 
-## ملاحظة توافق الاستضافة
-
-النسخ المرفقة حاليًا مبنية لـ **Linux x86_64/amd64**، وهي المعمارية التي يستخدمها خادم Wispbyte الظاهر في سجل التشغيل. لا تحذف مجلد `bin/` عند رفع المشروع، وتأكد من بقاء صلاحية التنفيذ للملفات الموجودة داخله. إذا نقلت المشروع إلى ARM64/aarch64 فستحتاج إلى نسخ ARM64 مختلفة.
-
 ## الحقوق والشروط
 
-إذا لم يكن لديك إذن لتنزيل الفيديو، فلا تشغّل البرنامج عليه. كما أن صفحة شروط RaiLoad المنشورة تمنح استخدامًا شخصيًا محدودًا وتنص على عدم استخدام الروبوتات أو أدوات جمع/استخراج البيانات؛ لذلك هذا المشروع لا يستدعي نقاط النهاية الخاصة بالموقع.
+إذا لم يكن لديك إذن لتنزيل الفيديو، فلا تشغّل البرنامج عليه. لا يؤتمت هذا المشروع موقع RaiLoad ولا يستدعي نقاط النهاية الخاصة به.

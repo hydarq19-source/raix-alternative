@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
-"""Portable authorized YouTube downloader using bundled yt-dlp and ffmpeg."""
+"""Authorized YouTube downloader using pip-installed yt-dlp and FFmpeg."""
 from __future__ import annotations
 
-import json
 import logging
 import os
 import random
-import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
+import imageio_ffmpeg
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
+
 LOG = logging.getLogger("authorized-downloader")
 ROOT = Path(__file__).resolve().parent
-BIN_DIR = ROOT / "bin"
-YTDLP = BIN_DIR / ("yt-dlp.exe" if os.name == "nt" else "yt-dlp")
-FFMPEG = BIN_DIR / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}
 
 
 def load_env_file(path: Path) -> None:
-    """Load simple KEY=VALUE entries without requiring external packages."""
+    """Load simple KEY=VALUE entries without requiring python-dotenv."""
     if not path.is_file():
         return
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -52,25 +51,14 @@ def env_int(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
-def check_bundled_tools() -> None:
-    missing = [str(path.relative_to(ROOT)) for path in (YTDLP, FFMPEG) if not path.is_file()]
-    if missing:
-        raise FileNotFoundError("Missing bundled tools: " + ", ".join(missing))
-    if os.name != "nt":
-        for path in (YTDLP, FFMPEG):
-            if not os.access(path, os.X_OK):
-                raise PermissionError(f"Tool is not executable: {path}")
-
-
-def read_video_info(url: str) -> dict:
-    command = [str(YTDLP), "--dump-single-json", "--no-warnings", "--no-playlist", url]
-    result = subprocess.run(command, text=True, capture_output=True, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "yt-dlp could not inspect the URL")
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("yt-dlp returned invalid metadata") from exc
+def progress_hook(event: dict) -> None:
+    if event.get("status") == "downloading":
+        percent = event.get("_percent_str", "?").strip()
+        speed = event.get("_speed_str", "?").strip()
+        eta = event.get("_eta", "?")
+        print(f"\rDownloading: {percent} | {speed} | ETA {eta}s", end="", flush=True)
+    elif event.get("status") == "finished":
+        print("\nDownload stream finished; post-processing...", flush=True)
 
 
 def available_qualities(info: dict) -> list[int]:
@@ -82,37 +70,24 @@ def available_qualities(info: dict) -> list[int]:
     return sorted(heights)
 
 
-def quality_label(height: int) -> str:
-    return f"{height}p"
-
-
-def download(url: str, output_dir: Path, height: int) -> None:
-    selector = (
-        f"bestvideo[height={height}]+bestaudio/"
-        f"best[height={height}]/best[height<={height}]"
-    )
-    command = [
-        str(YTDLP),
-        "--no-playlist",
-        "--format", selector,
-        "--merge-output-format", os.getenv("MERGE_FORMAT", "mp4"),
-        "--ffmpeg-location", str(BIN_DIR),
-        "--output", str(output_dir / "%(title).180B [%(id)s].%(ext)s"),
-        "--retries", str(env_int("MAX_RETRIES", 3)),
-        "--fragment-retries", str(env_int("MAX_RETRIES", 3)),
-        "--socket-timeout", str(env_int("SOCKET_TIMEOUT", 30)),
-        "--continue",
-        "--no-overwrites",
-        "--restrict-filenames",
-        "--windows-filenames",
-        "--newline",
-        url,
-    ]
-    LOG.info("Using bundled yt-dlp: %s", YTDLP)
-    LOG.info("Using bundled ffmpeg: %s", FFMPEG)
-    result = subprocess.run(command, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"yt-dlp download failed with exit code {result.returncode}")
+def build_options(output_dir: Path, format_selector: str, ffmpeg_path: str) -> dict:
+    return {
+        "format": format_selector,
+        "merge_output_format": os.getenv("MERGE_FORMAT", "mp4"),
+        "ffmpeg_location": ffmpeg_path,
+        "outtmpl": str(output_dir / "%(title).180B [%(id)s].%(ext)s"),
+        "noplaylist": True,
+        "retries": env_int("MAX_RETRIES", 3),
+        "fragment_retries": env_int("MAX_RETRIES", 3),
+        "socket_timeout": env_int("SOCKET_TIMEOUT", 30),
+        "continuedl": True,
+        "overwrites": False,
+        "quiet": False,
+        "restrictfilenames": True,
+        "windowsfilenames": True,
+        "logger": LOG,
+        "progress_hooks": [progress_hook],
+    }
 
 
 def main() -> int:
@@ -128,24 +103,34 @@ def main() -> int:
         return 2
 
     try:
-        check_bundled_tools()
         output_dir = Path(os.getenv("OUTPUT_DIR", "downloads")).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
         LOG.info("Output directory: %s", output_dir)
+        LOG.info("Using FFmpeg supplied by imageio-ffmpeg: %s", ffmpeg_path)
         LOG.info("Downloading only content you own or are authorized to save.")
 
-        info = read_video_info(url)
-        title = info.get("title") or info.get("id") or "video"
-        qualities = available_qualities(info)
-        if not qualities:
-            LOG.error("No downloadable video qualities were reported.")
-            return 1
+        initial_selector = os.getenv("FORMAT", "bestvideo*+bestaudio/best")
+        with YoutubeDL(build_options(output_dir, initial_selector, ffmpeg_path)) as ydl:
+            info = ydl.extract_info(url, download=False)
+            title = info.get("title") or info.get("id") or "video"
+            qualities = available_qualities(info)
+            if not qualities:
+                LOG.error("No downloadable video qualities were reported.")
+                return 1
 
-        LOG.info("Selected: %s", title)
-        LOG.info("Available qualities: %s", ", ".join(quality_label(q) for q in qualities))
-        chosen_height = random.SystemRandom().choice(qualities)
-        LOG.info("Randomly selected quality: %s", quality_label(chosen_height))
-        download(url, output_dir, chosen_height)
+            LOG.info("Selected: %s", title)
+            LOG.info("Available qualities: %s", ", ".join(f"{q}p" for q in qualities))
+            chosen_height = random.SystemRandom().choice(qualities)
+            LOG.info("Randomly selected quality: %sp", chosen_height)
+            ydl.params["format"] = (
+                f"bestvideo[height={chosen_height}]+bestaudio/"
+                f"best[height={chosen_height}]/best[height<={chosen_height}]"
+            )
+            ydl.download([url])
+    except DownloadError as exc:
+        LOG.error("yt-dlp failed: %s", exc)
+        return 1
     except (OSError, ValueError, RuntimeError) as exc:
         LOG.error("%s", exc)
         return 1
